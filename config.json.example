@@ -1,0 +1,36 @@
+[
+  {
+    "base": {
+      "code": "LIBERTAD",
+      "issuer": "GCRFFNWYQYLVVA43CD2RVFDILBLIFVBTGTXKVVMTJKBRC6PZWYQOAWCQ",
+      "rate": "USD"
+    },
+    "quote": {
+      "code": "XLM",
+      "rate": "XLM"
+    },
+    "secret": "",
+    "levels": [
+      0.001,
+      0.0015,
+      0.002
+    ]
+  },
+  {
+    "base": {
+      "code": "GYD",
+      "issuer": "",
+      "rate": "GYD",
+    },
+    "quote": {
+      "code": "XLM",
+      "rate": "XLM"
+    },
+    "secret": "",
+    "levels": [
+      0.001,
+      0.0015,
+      0.002
+    ]
+  }
+]

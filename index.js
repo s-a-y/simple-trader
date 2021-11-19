@@ -1,107 +1,117 @@
 import {Asset, Keypair, Networks, Operation, Server, TransactionBuilder} from 'stellar-sdk';
 import fetch from 'node-fetch';
+import { readFileSync } from 'fs';
 
 const server = new Server('https://horizon.stellar.org');
-const keypair = Keypair.fromSecret(process.env.SECRET);
-const levels = [
-  0.001,
-  0.0015,
-  0.002,
-]
 const rebalanceAutomatically = true;
+const markets = JSON.parse(readFileSync('./config.json').toString());
 
 async function reset() {
-  const ratePromise = fetch('https://api.kraken.com/0/public/Ticker?pair=XXLMZUSD')
-    .then((response) => {
-      return response.json();
-    })
-    .then((result) => {
-      return result.result.XXLMZUSD.c[0];
-    });
+  for (const market of markets) {
+    if (!market.secret) {
+      console.log('Please put Stellar account secret into config')
+      continue;
+    }
+    const keypair = Keypair.fromSecret(market.secret);
 
-  const asset = new Asset('LIBERTAD', 'GCRFFNWYQYLVVA43CD2RVFDILBLIFVBTGTXKVVMTJKBRC6PZWYQOAWCQ');
-  const accountPromise = server.loadAccount(keypair.publicKey());
-
-  const offersPromise = server.offers().forAccount(keypair.publicKey()).call()
-    .then((result) => {
-      return result.records.map((v) => {
-        return {
-          offerId: v.id,
-          account: v.seller,
-          sellingAssetType: v.selling.asset_type,
-          sellingAssetCode: v.selling.asset_code,
-          sellingAssetIssuer: v.selling.asset_issuer,
-          buyingAssetType: v.buying.asset_type,
-          buyingAssetCode: v.buying.asset_code,
-          buyingAssetIssuer: v.buying.asset_issuer,
-          amount: v.amount,
-          price: v.price
+    const ratePromise = fetch('https://rates.apay.io')
+      .then((response) => {
+        return response.json();
+      })
+      .then((result) => {
+        if (!result.USD) {
+          throw new Error('rates are not available yet');
         }
-      });
-    });
-
-  Promise.all([ratePromise, accountPromise, offersPromise])
-    .then(([rate, account, offers]) => {
-      const xlmBalance = getXLMBalance(account);
-      const assetBalance = getAssetBalance(account, asset);
-      const ratio = rebalanceAutomatically ? xlmBalance / (xlmBalance + assetBalance / rate) : 0.5;
-      console.log(rate, xlmBalance, assetBalance / rate, ratio);
-
-      const txBuilder = new TransactionBuilder(account, {
-        fee: '200',
-        networkPassphrase: Networks.PUBLIC,
+        return parseFloat(result[market.base.rate]) / parseFloat(result[market.quote.rate]);
       });
 
-      offers.forEach((offer) => {
-        txBuilder.addOperation(removeOffer(offer, keypair.publicKey()));
-      });
+    const baseAsset = new Asset(market.base.code, market.base.issuer);
+    const quoteAsset = new Asset(market.quote.code, market.quote.issuer)
+    const accountPromise = server.loadAccount(keypair.publicKey());
 
-      if (xlmBalance) {
-        let sum = 0;
-        levels.forEach((offset) => {
-          const amount = (Math.min(xlmBalance / levels.length, xlmBalance - sum)).toFixed(7);
-          if (parseFloat(amount) > 0) {
-            txBuilder
-              .addOperation(Operation.manageSellOffer({
-                selling: Asset.native(),
-                buying: asset,
-                amount: amount,
-                price: (rate * (1 + offset + (0.5 - ratio) * levels[0])).toFixed(7),
-              }));
-            // console.log((rate * (1 + offset + (0.5 - ratio) * levels[0])).toFixed(7));
-            sum += parseFloat(amount);
+    const offersPromise = server.offers().forAccount(keypair.publicKey()).call()
+      .then((result) => {
+        return result.records.map((v) => {
+          return {
+            offerId: v.id,
+            account: v.seller,
+            sellingAssetType: v.selling.asset_type,
+            sellingAssetCode: v.selling.asset_code,
+            sellingAssetIssuer: v.selling.asset_issuer,
+            buyingAssetType: v.buying.asset_type,
+            buyingAssetCode: v.buying.asset_code,
+            buyingAssetIssuer: v.buying.asset_issuer,
+            amount: v.amount,
+            price: v.price
           }
         });
-      }
+      });
 
-      if (assetBalance) {
-        let sum = 0;
-        levels.forEach((offset) => {
-          const amount = (Math.min(assetBalance / levels.length, assetBalance - sum)).toFixed(7);
-          if (parseFloat(amount) > 0) {
-            txBuilder
-              .addOperation(Operation.manageSellOffer({
-                selling: asset,
-                buying: Asset.native(),
-                amount: amount,
-                price: (1 / rate / (1 - offset - (0.5 - ratio) * levels[0])).toFixed(7),
-              }));
-            // console.log((rate * (1 - offset - (0.5 - ratio) * levels[0])).toFixed(7))
-            sum += parseFloat(amount);
-          }
+    Promise.all([ratePromise, accountPromise, offersPromise])
+      .then(([rate, account, offers]) => {
+        const baseAssetBalance = getAssetBalance(account, baseAsset);
+        const quoteAssetBalance = getAssetBalance(account, quoteAsset);
+        const ratio = rebalanceAutomatically ? quoteAssetBalance / (quoteAssetBalance + baseAssetBalance / rate) : 0.5;
+        console.log(rate, baseAsset.code, '/', quoteAsset.code, quoteAssetBalance, baseAssetBalance / rate, ratio);
+
+        const txBuilder = new TransactionBuilder(account, {
+          fee: '200',
+          networkPassphrase: Networks.PUBLIC,
         });
-      }
 
-      const tx = txBuilder.setTimeout(30).build();
+        offers.forEach((offer) => {
+          txBuilder.addOperation(removeOffer(offer, keypair.publicKey()));
+        });
 
-      tx.sign(keypair);
-      // console.log(tx.toEnvelope().toXDR().toString('base64'));
-      return server.submitTransaction(tx);
-    })
-    .then(() => {console.log('sent tx successfully'); })
-    .catch((err) => {
-      console.error(err.message, err.response && err.response.data || err);
-    });
+        if (quoteAssetBalance) {
+          let sum = 0;
+          market.levels.forEach((offset) => {
+            const amount = (Math.min(quoteAssetBalance / market.levels.length, quoteAssetBalance - sum)).toFixed(7);
+            if (parseFloat(amount) > 0) {
+              txBuilder
+                .addOperation(Operation.manageSellOffer({
+                  selling: quoteAsset,
+                  buying: baseAsset,
+                  amount: amount,
+                  price: (rate * (1 + offset + (0.5 - ratio) * market.levels[0])).toFixed(7),
+                }));
+              // console.log((rate * (1 + offset + (0.5 - ratio) * levels[0])).toFixed(7));
+              sum += parseFloat(amount);
+            }
+          });
+        }
+
+        if (baseAssetBalance) {
+          let sum = 0;
+          market.levels.forEach((offset) => {
+            const amount = (Math.min(baseAssetBalance / market.levels.length, baseAssetBalance - sum)).toFixed(7);
+            if (parseFloat(amount) > 0) {
+              txBuilder
+                .addOperation(Operation.manageSellOffer({
+                  selling: baseAsset,
+                  buying: quoteAsset,
+                  amount: amount,
+                  price: (1 / rate / (1 - offset - (0.5 - ratio) * market.levels[0])).toFixed(7),
+                }));
+              // console.log((rate * (1 - offset - (0.5 - ratio) * levels[0])).toFixed(7))
+              sum += parseFloat(amount);
+            }
+          });
+        }
+
+        const tx = txBuilder.setTimeout(30).build();
+
+        tx.sign(keypair);
+        // console.log(tx.toEnvelope().toXDR().toString('base64'));
+        return server.submitTransaction(tx);
+      })
+      .then(() => {
+        console.log('sent tx successfully');
+      })
+      .catch((err) => {
+        console.error(err.message, err.response && err.response.data || err);
+      });
+  }
 }
 
 function getXLMBalance(account) {
@@ -111,6 +121,9 @@ function getXLMBalance(account) {
 }
 
 function getAssetBalance(account, asset) {
+  if (!asset.issuer) {
+    return getXLMBalance(account);
+  }
   const balance = account.balances.find((balance) => {
     return balance.asset_code === asset.getCode() && balance.asset_issuer === asset.getIssuer();
   });
